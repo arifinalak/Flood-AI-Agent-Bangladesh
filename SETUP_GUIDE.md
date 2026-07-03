@@ -157,10 +157,3 @@ Every 1 hour:
   6. Log results
 ```
 
----
-
-## For Kaggle Submission
-- Replace simulated sensor data with real BWDB API calls
-- Add more districts and stations
-- Show the dashboard as your demo
-- Highlight: autonomous reasoning, Bangla language, real SDG-13 impact
