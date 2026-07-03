@@ -1,0 +1,332 @@
+"""
+Live Web Dashboard for Flood Agent
+Run: python dashboard.py
+Open: http://localhost:5000
+"""
+
+from flask import Flask, render_template_string, jsonify
+import firebase_admin
+from firebase_admin import credentials, db
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+app = Flask(__name__)
+
+# Init Firebase (only if not already done)
+if not firebase_admin._apps:
+    cred = credentials.Certificate("firebase_key.json")
+    firebase_admin.initialize_app(cred, {
+        "databaseURL": os.getenv("FIREBASE_DB_URL")
+    })
+
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bangladesh Flood Early Warning</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: sans-serif;
+      background: #f5f5f5;
+      color: #222;
+    }
+
+    header {
+      background: #1a56db;
+      color: #fff;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    header h1 {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    #updated {
+      font-size: 12px;
+      opacity: .75;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      height: calc(100vh - 52px);
+    }
+
+    .sidebar {
+      overflow-y: auto;
+      padding: 16px;
+      background: #fff;
+      border-right: 1px solid #e5e7eb;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+
+    .card {
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 12px;
+      background: #fff;
+    }
+
+    .card h3 {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 8px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .SAFE {
+      background: #d1fae5;
+      color: #065f46;
+    }
+
+    .WATCH {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .WARNING {
+      background: #fed7aa;
+      color: #9a3412;
+    }
+
+    .DANGER {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .district-item {
+      padding: 10px 0;
+      border-bottom: 1px solid #f3f4f6;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .district-item:last-child {
+      border-bottom: none;
+    }
+
+    .d-name {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .d-detail {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+
+    .sms-item {
+      padding: 8px 0;
+      border-bottom: 1px solid #f3f4f6;
+      font-size: 13px;
+    }
+
+    .sms-item:last-child {
+      border-bottom: none;
+    }
+
+    .sms-time {
+      font-size: 11px;
+      color: #9ca3af;
+    }
+
+    .summary-box {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      color: #1e40af;
+    }
+
+    .refresh-btn {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      color: #374151;
+      margin-bottom: 12px;
+    }
+
+    .refresh-btn:hover {
+      background: #f9fafb;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Bangladesh Flood Early Warning Agent</h1>
+    <span id="updated">Loading...</span>
+  </header>
+  <div class="layout">
+    <div class="sidebar">
+      <button class="refresh-btn" onclick="loadData()">Refresh Data</button>
+      <div id="summary" class="summary-box">Loading AI analysis...</div>
+      <div class="card">
+        <h3>District Risk Levels</h3>
+        <div id="districts">Loading...</div>
+      </div>
+      <div class="card">
+        <h3>Recent SMS Alerts</h3>
+        <div id="sms-log">Loading...</div>
+      </div>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <script>
+    const RISK_COLORS = { SAFE: '#16a34a', WATCH: '#d97706', WARNING: '#ea580c', DANGER: '#dc2626' };
+    const COORDS = {
+      'Sylhet': [24.8949, 91.8687],
+      'Sunamganj': [25.0658, 91.3950],
+      'Netrokona': [24.8703, 90.7279],
+      'Jamalpur': [24.9376, 89.9407],
+    };
+
+    const map = L.map('map').setView([23.9, 90.4], 7);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    let markers = [];
+
+    async function loadData() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        document.getElementById('summary').textContent = data.summary || 'No summary available.';
+        document.getElementById('updated').textContent = 'Updated: ' + (data.updated_at || 'Unknown');
+
+        // Clear old markers
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+
+        // Render districts
+        const districtEl = document.getElementById('districts');
+        districtEl.innerHTML = '';
+
+        (data.assessments || []).forEach(a => {
+          const color = RISK_COLORS[a.risk_level] || '#6b7280';
+          const coords = COORDS[a.district];
+
+          // Sidebar item
+          districtEl.innerHTML += `
+        <div class="district-item">
+          <div>
+            <div class="d-name">${a.district}</div>
+            <div class="d-detail">${a.water_pct || '–'}% water level · ${a.rainfall_mm || 0}mm rain</div>
+            ${a.hours_to_flood ? '<div class="d-detail">~' + a.hours_to_flood + ' hrs to flood</div>' : ''}
+          </div>
+          <span class="badge ${a.risk_level}">${a.risk_level}</span>
+        </div>`;
+
+          // Map marker
+          if (coords) {
+            const circle = L.circleMarker(coords, {
+              radius: 28, color: color, fillColor: color,
+              fillOpacity: 0.35, weight: 2
+            }).addTo(map);
+
+            circle.bindPopup(`
+          <strong>${a.district}</strong><br>
+          Risk: <b style="color:${color}">${a.risk_level}</b><br>
+          Water: ${a.water_pct}%<br>
+          Rainfall: ${a.rainfall_mm}mm<br>
+          ${a.bangla_sms ? '<br><em>' + a.bangla_sms + '</em>' : ''}
+        `);
+            markers.push(circle);
+          }
+        });
+
+        // SMS log
+        const smsEl = document.getElementById('sms-log');
+        smsEl.innerHTML = '';
+        (data.sms_log || []).slice(0, 8).forEach(s => {
+          smsEl.innerHTML += `
+        <div class="sms-item">
+          <div><strong>${s.name}</strong> · ${s.district} · <span class="badge ${s.risk}">${s.risk}</span></div>
+          <div class="sms-time">${s.sent_at}</div>
+        </div>`;
+        });
+        if (!data.sms_log || data.sms_log.length === 0) {
+          smsEl.innerHTML = '<div style="font-size:13px;color:#9ca3af;padding:8px 0">No alerts sent yet.</div>';
+        }
+
+      } catch (e) {
+        console.error('Dashboard error:', e);
+      }
+    }
+
+    loadData();
+    setInterval(loadData, 60000); // Auto-refresh every minute
+  </script>
+</body>
+
+</html>
+"""
+
+@app.route("/")
+def dashboard():
+    return render_template_string(DASHBOARD_HTML)
+
+@app.route("/api/status")
+def api_status():
+    """Returns latest agent data for the dashboard"""
+    try:
+        status = db.reference("latest_status").get() or {}
+        sms_raw = db.reference("sms_log").get() or {}
+        sms_log = sorted(
+            sms_raw.values(),
+            key=lambda x: x.get("sent_at",""),
+            reverse=True
+        ) if isinstance(sms_raw, dict) else []
+
+        return jsonify({
+            "assessments": status.get("assessments", []),
+            "summary": status.get("summary", "No data yet."),
+            "updated_at": status.get("updated_at", ""),
+            "sms_log": sms_log[:10]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    print("Dashboard running at http://localhost:5000")
+    app.run(debug=True, port=5000)
